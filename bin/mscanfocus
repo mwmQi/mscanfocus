@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import socket
 import requests
@@ -208,7 +209,7 @@ def format_row(code, server, port, ip_address, host, method, use_colors=True):
 
 # Check HTTP response
 def check_http_response(host, port, method):
-    url = f"{'https' if port in ['443', '8443'] else 'http'}://{host}:{port}"
+    url = f"{('https' if port in ['443', '8443'] else 'http')}://{host}:{port}"
     try:
         timeout = int(SETTINGS.get("timeout", 5))
         allow_redirects = SETTINGS.get("allow_redirects", True)
@@ -576,12 +577,6 @@ def update_tool():
         # currently running script (which is about to be replaced) is sufficient
         # for merging, or that the new script's DEFAULT_SETTINGS will be applied
         # on next run if it's a fresh setting.
-        # Let's make it robust by re-loading the default settings from the newly copied script.
-        
-        # To get the *new* default settings, we need to re-evaluate the script or have a separate defaults file.
-        # For simplicity and given the CLI nature, we'll assume the DEFAULT_SETTINGS
-        # in the *currently running* script (which is the old one) is sufficient for merging
-        # with the user's existing settings. New settings will be added from the old DEFAULT_SETTINGS.
         # This is a slight compromise but avoids complex dynamic module reloading.
         # The user will get new settings on the *next* run if they were truly new.
 
