@@ -113,7 +113,7 @@ def display_header():
      ░          ░  ░    ░ ░           ░    ░  ░
           ░                                     
     """)
-    print(Fore.YELLOW + "       Macro - t.me/@MeQhe\n")
+    print(Fore.YELLOW + "       Macro - t.me/mscanfocus\n")
     print(Fore.CYAN + "🔹 Select Mode:")
     print("  1. Manual File Scan")
     print("  2. Auto Scan Folder")
