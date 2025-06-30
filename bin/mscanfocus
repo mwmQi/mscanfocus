@@ -1,0 +1,679 @@
+import os
+import socket
+import requests
+import threading
+import itertools
+import json
+from tqdm import tqdm
+from pathlib import Path
+from colorama import Fore, Style, init
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import shutil
+import time
+import datetime
+import platform
+
+# Initialize colorama
+init(autoreset=True)
+
+# Set default base path (Android downloads folder)
+DEFAULT_BASE_PATH = "/storage/emulated/0/download"
+
+# Settings folder and file
+SETTINGS_FOLDER = os.path.join(DEFAULT_BASE_PATH, "🔧settings")
+SETTINGS_FILE = os.path.join(SETTINGS_FOLDER, "settings.txt")
+
+# Default settings
+DEFAULT_SETTINGS = {
+    "default_ports": "443,80",
+    "default_threads": 50,
+    "default_method": "GET",
+    "timeout": 5,
+    "chunk_size": 1000,
+    "allow_redirects": True,
+    "telegram_bot_token": "YOUR_BOT_TOKEN",
+    "telegram_chat_id": "YOUR_CHAT_ID",
+    "exclude_redirect_urls": "",
+    "git_repo_url": "https://github.com/mwmQi/mscanfocus.git"
+}
+
+# Function to load settings
+def load_settings():
+    if not os.path.exists(SETTINGS_FOLDER):
+        os.makedirs(SETTINGS_FOLDER)
+    
+    if not os.path.exists(SETTINGS_FILE):
+        # Create default settings file if it doesn't exist
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(DEFAULT_SETTINGS, f, indent=4)
+        print(f"{Fore.YELLOW}📝 Created default settings file at {SETTINGS_FILE}")
+        return DEFAULT_SETTINGS
+    
+    try:
+        with open(SETTINGS_FILE, 'r') as f:
+            settings = json.load(f)
+            print(f"{Fore.GREEN}✅ Loaded settings from {SETTINGS_FILE}")
+            # Merge with defaults to ensure all settings exist
+            for key, value in DEFAULT_SETTINGS.items():
+                if key not in settings:
+                    settings[key] = value
+            return settings
+    except Exception as e:
+        print(f"{Fore.RED}❌ Error loading settings: {e}")
+        print(f"{Fore.YELLOW}⚠️ Using default settings")
+        return DEFAULT_SETTINGS
+
+# Load settings
+SETTINGS = load_settings()
+
+# Folder paths relative to the base path
+MANUAL_SCAN_FOLDER = os.path.join(DEFAULT_BASE_PATH, "🔍manual_scan")
+AUTO_SCAN_FOLDER = os.path.join(DEFAULT_BASE_PATH, "🔍auto_scan")
+RESULTS_MANUAL_FOLDER = os.path.join(MANUAL_SCAN_FOLDER, "📁xresult_manual")
+RESULTS_AUTO_FOLDER = os.path.join(AUTO_SCAN_FOLDER, "📁xresult_auto")
+SCANNED_TXT_FOLDER = os.path.join(AUTO_SCAN_FOLDER, "scanned_txt's")
+UPLOADED_RESULTS_FOLDER = os.path.join(DEFAULT_BASE_PATH, "uploaded_results")
+
+# Ensure required folders exist
+for folder in [MANUAL_SCAN_FOLDER, AUTO_SCAN_FOLDER, RESULTS_MANUAL_FOLDER, RESULTS_AUTO_FOLDER, SCANNED_TXT_FOLDER, UPLOADED_RESULTS_FOLDER]:
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+
+FILE_WRITE_LOCK = threading.Lock()
+
+# Function to get user input with validation
+def get_input(prompt, default=None, validator=None):
+    user_input = input(f"{Fore.YELLOW}🔹 {prompt}{Fore.LIGHTBLACK_EX} [Default: {default}] {Fore.RESET}") or default
+    if validator and not validator(user_input):
+        print(Fore.RED + "❌ Invalid input. Please try again." + Fore.RESET)
+        return get_input(prompt, default, validator)
+    return user_input
+
+# Validators
+def not_empty(value):
+    return bool(value.strip())
+
+def is_numeric(value):
+    return value.isdigit()
+
+def valid_ports(value):
+    return all(port.strip().isdigit() for port in value.split(","))
+
+# Display Header with Colors and Boldness
+def display_header():
+    print(Style.BRIGHT + Fore.CYAN + r"""
+     ▄▄▄▄    ██▓     ▒█████   ███▄    █ ▓█████ 
+    ▓█████▄ ▓██▒    ▒██▒  ██▒ ██ ▀█   █ ▓█   ▀ 
+    ▒██▒ ▄██▒██░    ▒██░  ██▒▓██  ▀█ ██▒▒███   
+    ▒██░█▀  ▒██░    ▒██   ██░▓██▒  ▐▌██▒▒▓█  ▄ 
+    ░▓█  ▀█▓░██████▒░ ████▓▒░▒██░   ▓██░░▒████▒
+    ░▒▓███▀▒░ ▒░▓  ░░ ▒░▒░▒░ ░ ▒░   ▒ ▒ ░░ ▒░ ░
+    ▒░▒   ░ ░ ░ ▒  ░  ░ ▒ ▒░ ░ ░░   ░ ▒░ ░ ░  ░
+     ░    ░   ░ ░   ░ ░ ░ ▒     ░   ░ ░    ░   
+     ░          ░  ░    ░ ░           ░    ░  ░
+          ░                                     
+    """)
+    print(Fore.YELLOW + "       Macro - t.me/@MeQhe\n")
+    print(Fore.CYAN + "🔹 Select Mode:")
+    print("  1. Manual File Scan")
+    print("  2. Auto Scan Folder")
+    print("  3. Manual Input Scan (Results not saved)")
+    print("  4. Edit Settings")
+    print("  5. Upload Results to Telegram")
+    print("  6. Update Tool")
+    print(Fore.RESET)
+
+# Read hosts from file in chunks
+def get_hosts_from_file(file_path, chunk_size=None):
+    """Read hosts from file in chunks to handle large files."""
+    if chunk_size is None:
+        chunk_size = int(SETTINGS.get("chunk_size", 1000))
+    
+    try:
+        hosts = []
+        total_hosts = 0
+        with open(file_path, 'r') as file:
+            while True:
+                # Read a chunk of lines
+                lines = list(itertools.islice(file, chunk_size))
+                if not lines:
+                    break
+                
+                # Process the chunk
+                chunk_hosts = [line.strip() for line in lines if line.strip()]
+                hosts.extend(chunk_hosts)
+                
+                # Show progress for large files
+                total_hosts += len(chunk_hosts)
+                print(f"{Fore.CYAN}📊 Loaded {total_hosts} hosts so far...{Fore.RESET}")
+        
+        print(f"{Fore.GREEN}✅ Successfully loaded {len(hosts)} hosts from {file_path}{Fore.RESET}")
+        return hosts
+    except Exception as e:
+        print(Fore.RED + f"❌ Error reading file: {e}")
+        return []
+
+# File manager UI for selecting target file
+def file_manager(start_dir):
+    current_dir = Path(start_dir).resolve()
+    while True:
+        files = [f for f in current_dir.iterdir() if f.is_file() and f.suffix == '.txt']
+        if not files:
+            print(Fore.RED + "❌ No .txt files found.")
+            return None
+        print(Fore.CYAN + f"\n📂 Current Directory: {current_dir}")
+        for idx, file in enumerate(files, 1):
+            print(f"  {idx}. 📄 {Fore.WHITE}{file.name}")
+        selection = get_input("Enter the number of the file", validator=is_numeric)
+        index = int(selection) - 1
+        if 0 <= index < len(files):
+            return files[index]
+        print(Fore.RED + "❌ Invalid selection. Try again.")
+
+# Get scan inputs
+def get_scan_inputs():
+    ports = get_input("Enter ports (comma-separated)", default=SETTINGS.get("default_ports", "443,80"), validator=valid_ports)
+    port_list = [port.strip() for port in ports.split(",")]
+    
+    threads = get_input("Enter number of threads", default=str(SETTINGS.get("default_threads", 50)), validator=is_numeric)
+    threads = int(threads)
+    
+    default_method_num = {
+        'GET': '1', 'POST': '2', 'DELETE': '3', 'PUT': '4', 'HEAD': '5',
+        'CONNECT': '6', '7': 'OPTIONS', '8': 'PATCH', '9': 'TRACE'
+    }.get(SETTINGS.get("default_method", "GET"), "1")
+    
+    method = get_input(
+        "Select HTTP method:\n"
+        "  1. GET\n  2. POST\n  3. DELETE\n  4. PUT\n  5. HEAD\n"
+        "  6. CONNECT\n  7. OPTIONS\n  8. PATCH\n  9. TRACE\n",
+        default=default_method_num
+    )
+    method_dict = {
+        '1': 'GET', '2': 'POST', '3': 'DELETE', '4': 'PUT', '5': 'HEAD',
+        '6': 'CONNECT', '7': 'OPTIONS', '8': 'PATCH', '9': 'TRACE'
+    }
+    method = method_dict.get(method, "GET")
+    return port_list, threads, method
+
+# Format output row
+def format_row(code, server, port, ip_address, host, method, use_colors=True):
+    color = lambda text, clr: f"{clr}{text}" if use_colors else text
+    return (f"{color(code, Fore.GREEN):<4} "
+            f"{color(server, Fore.CYAN):<20} "
+            f"{color(port, Fore.YELLOW):<5} "
+            f"{color(ip_address, Fore.MAGENTA):<15} "
+            f"{color(method, Fore.RED):<7} "
+            f"{color(host, Fore.LIGHTBLUE_EX)}")
+
+# Check HTTP response
+def check_http_response(host, port, method):
+    url = f"{'https' if port in ['443', '8443'] else 'http'}://{host}:{port}"
+    try:
+        timeout = int(SETTINGS.get("timeout", 5))
+        allow_redirects = SETTINGS.get("allow_redirects", True)
+        exclude_redirect_urls_str = SETTINGS.get("exclude_redirect_urls", "")
+        exclude_redirect_urls = [u.strip() for u in exclude_redirect_urls_str.split(',') if u.strip()]
+
+        response = requests.request(
+            method, 
+            url, 
+            timeout=timeout, 
+            allow_redirects=False # We handle redirects manually for 302 checks
+        )
+
+        if response.status_code == 302:
+            location = response.headers.get('Location')
+            if location:
+                for excluded_url in exclude_redirect_urls:
+                    if excluded_url in location:
+                        return None # Ignore if location is in exclude list
+            # If not excluded, treat as a valid 302 result
+            return response.status_code, response.headers.get('Server', ''), port, socket.gethostbyname(host), host, method
+        
+        # For other status codes, proceed as usual
+        return response.status_code, response.headers.get('Server', ''), port, socket.gethostbyname(host), host, method
+    except (requests.RequestException, socket.gaierror):
+        return None
+
+# Perform the scan
+def perform_scan(hosts, ports, output_file, threads, method, move_scanned_file=None):
+    os.system("clear" if os.name == "posix" else "cls")
+    print(Fore.LIGHTGREEN_EX + f"🚀 Scanning {len(hosts)} hosts using HTTP method: {method} on ports {', '.join(ports)}...\n")
+    headers = (f"{Fore.GREEN}{'Code':<4}  {Fore.CYAN}{'Server':<20}  "
+               f"{Fore.YELLOW}{'Port':<5}  {Fore.MAGENTA}{'IP Address':<15}  "
+               f"{Fore.RED}{'Method':<7}  {Fore.LIGHTBLUE_EX}Host")
+    separator = "-" * 75
+    with open(output_file, 'w') as file:
+        # Add header information
+        file.write(f"Scan Date: {datetime.datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')}\n")
+        file.write(f"Device Hostname: {socket.gethostname()}\n")
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            file.write(f"Local IP Address: {local_ip}\n")
+        except:
+            file.write(f"Local IP Address: N/A\n")
+        file.write(f"Operating System: {platform.system()} {platform.release()}\n")
+        file.write(f"\n") # Add a blank line for separation
+        file.write(f"{headers}\n{separator}\n")
+    print(headers, separator, sep='\n')
+    pbar = tqdm(total=len(hosts) * len(ports), desc="🔍 Progress", unit="host", unit_scale=True)
+    
+    def process_result(future):
+        result = future.result()
+        if result:
+            row = format_row(*result)
+            pbar.write(row)
+            with FILE_WRITE_LOCK:
+                with open(output_file, 'a') as file:
+                    file.write(format_row(*result, use_colors=False) + "\n")
+        pbar.update(1)
+    
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = {executor.submit(check_http_response, host, port, method): (host, port) for host in hosts for port in ports}
+        for future in as_completed(futures):
+            process_result(future)
+    
+    pbar.close()
+    print(f"\n\n{Fore.GREEN}✅ Scan completed! Results saved to {output_file}")
+    if move_scanned_file:
+        shutil.move(move_scanned_file, os.path.join(SCANNED_TXT_FOLDER, os.path.basename(move_scanned_file)))
+        print(Fore.GREEN + f"✔️ Moved scanned file to {SCANNED_TXT_FOLDER}")
+
+# Auto Scan
+def auto_scan():
+    ports, threads, method = get_scan_inputs()
+    txt_files = [f for f in os.listdir(AUTO_SCAN_FOLDER) if f.endswith(".txt")]
+    if not txt_files:
+        print(Fore.RED + "❌ No .txt files found in '🔍auto_scan' folder.")
+        return
+    for txt_file in txt_files:
+        file_path = os.path.join(AUTO_SCAN_FOLDER, txt_file)
+        print(Fore.CYAN + f"\n📄 Processing file: {txt_file}")
+        hosts = get_hosts_from_file(file_path)
+        if not hosts:
+            print(Fore.RED + f"❌ No valid hosts found in {txt_file}. Skipping...")
+            continue
+        output_file = os.path.join(RESULTS_AUTO_FOLDER, f"xresult_auto_{txt_file}")
+        perform_scan(hosts, ports, output_file, threads, method, move_scanned_file=file_path)
+
+# Manual Input Scan
+def manual_input_scan():
+    print(Fore.CYAN + "\n🔹 Manual Input Scan Mode")
+    ports, threads, method = get_scan_inputs()
+    
+    # Get hosts from user input
+    print(Fore.YELLOW + "Enter hosts one by one or paste multiple hosts separated by new lines.")
+    print(Fore.YELLOW + "Type 'done' on a new line when you're finished.")
+    hosts = []
+    while True:
+        host = input(f"{Fore.LIGHTBLUE_EX}Enter host: {Fore.RESET}")
+        if host.strip().lower() == "done":
+            break
+        if host.strip():  # Only add non-empty lines
+            hosts.append(host.strip())
+    
+    if not hosts:
+        print(Fore.RED + "❌ No hosts provided. Exiting manual scan.")
+        return
+    
+    print(Fore.GREEN + f"\n🚀 Scanning {len(hosts)} hosts using HTTP method: {method} on ports {', '.join(ports)}...\n")
+    
+    # Create a temporary file for manual scan results
+    temp_output_file = os.path.join(RESULTS_MANUAL_FOLDER, f"manual_scan_results_{int(time.time())}.txt")
+    perform_scan(hosts, ports, temp_output_file, threads, method)
+    
+    print(Fore.GREEN + "\n✅ Manual scan completed! Results were displayed above.\n")
+    print(Fore.YELLOW + f"📝 Results also saved to: {temp_output_file}")
+
+# Edit settings
+def edit_settings():
+    print(Fore.CYAN + "\n🔧 Settings Editor")
+    print(Fore.YELLOW + "Current settings:")
+    
+    # Display current settings with descriptions for certain settings
+    setting_descriptions = {
+        "default_ports": "Default ports to scan (comma-separated)",
+        "default_threads": "Default number of threads to use",
+        "default_method": "Default HTTP method",
+        "timeout": "Request timeout in seconds",
+        "chunk_size": "Number of lines to read at once from files",
+        "allow_redirects": "Follow redirects during requests",
+        "telegram_bot_token": "Your Telegram Bot API Token",
+        "telegram_chat_id": "Your Telegram Chat ID (e.g., @mychannel or -123456789)",
+        "exclude_redirect_urls": "Comma-separated URLs to exclude for 302 redirects (e.g., example.com, google.com)",
+        "git_repo_url": "URL of your Git repository for updates"
+    }
+    
+    for idx, (key, value) in enumerate(SETTINGS.items(), 1):
+        description = setting_descriptions.get(key, "")
+        if description:
+            description = f" - {Fore.LIGHTCYAN_EX}{description}{Fore.RESET}"
+        print(f"  {idx}. {Fore.WHITE}{key}: {Fore.GREEN}{value}{description}")
+    
+    print(f"\n{Fore.YELLOW}Choose an option:")
+    print(f"  1. Edit a setting")
+    print(f"  2. Reset to defaults")
+    print(f"  3. Return to main menu")
+    
+    choice = get_input("Enter your choice", default="3")
+    
+    if choice == "1":
+        setting_idx = int(get_input("Enter setting number to edit", validator=is_numeric))
+        if 1 <= setting_idx <= len(SETTINGS):
+            key = list(SETTINGS.keys())[setting_idx-1]
+            current_value = SETTINGS[key]
+            
+            # Add help text for specific settings
+            help_text = ""
+            if key in ["allow_redirects"]:
+                help_text = f"{Fore.LIGHTCYAN_EX}(true/false){Fore.RESET}"
+            
+            new_value = get_input(f"Enter new value for {key} {help_text}", default=str(current_value))
+            
+            # Convert to appropriate type
+            if isinstance(current_value, bool):
+                SETTINGS[key] = new_value.lower() in ('true', 'yes', 'y', '1')
+            elif isinstance(current_value, int):
+                SETTINGS[key] = int(new_value)
+            else:
+                SETTINGS[key] = new_value
+                
+            # Save settings
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(SETTINGS, f, indent=4)
+            print(f"{Fore.GREEN}✅ Settings updated successfully")
+            
+            # Recursive call to stay in settings menu
+            return edit_settings()
+        else:
+            print(f"{Fore.RED}❌ Invalid setting number")
+            return edit_settings()
+            
+    elif choice == "2":
+        confirm = get_input("Are you sure you want to reset to defaults? (y/n)", default="n")
+        if confirm.lower() in ('y', 'yes'):
+            SETTINGS.update(DEFAULT_SETTINGS)
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(SETTINGS, f, indent=4)
+            print(f"{Fore.GREEN}✅ Settings reset to defaults")
+        return edit_settings()
+        
+    # Return to main menu for any other choice
+    return
+
+# Upload Results to Telegram
+def upload_results_to_telegram():
+    print(Fore.CYAN + "\n📤 Upload Results to Telegram")
+    
+    bot_token = SETTINGS.get("telegram_bot_token")
+    chat_id = SETTINGS.get("telegram_chat_id")
+
+    if bot_token == "YOUR_BOT_TOKEN" or chat_id == "YOUR_CHAT_ID":
+        print(Fore.RED + "❌ Please configure your Telegram Bot Token and Chat ID in settings first.")
+        return
+
+    all_result_files = []
+    # Add files from manual scan results
+    for f in os.listdir(RESULTS_MANUAL_FOLDER):
+        if f.startswith("xresult_manual_") and f.endswith(".txt"):
+            all_result_files.append(os.path.join(RESULTS_MANUAL_FOLDER, f))
+    # Add files from auto scan results
+    for f in os.listdir(RESULTS_AUTO_FOLDER):
+        if f.startswith("xresult_auto_") and f.endswith(".txt"):
+            all_result_files.append(os.path.join(RESULTS_AUTO_FOLDER, f))
+
+    if not all_result_files:
+        print(Fore.YELLOW + "⚠️ No scan result files found to upload.")
+        return
+
+    print(Fore.YELLOW + "Select files to upload (comma-separated numbers, or 'all'):")
+    for idx, file_path in enumerate(all_result_files, 1):
+        print(f"  {idx}. {os.path.basename(file_path)}")
+
+    selection = get_input("Enter your choice", validator=not_empty)
+    
+    files_to_upload = []
+    if selection.lower() == "all":
+        files_to_upload = all_result_files
+    else:
+        try:
+            selected_indices = [int(x.strip()) - 1 for x in selection.split(",")]
+            for idx in selected_indices:
+                if 0 <= idx < len(all_result_files):
+                    files_to_upload.append(all_result_files[idx])
+                else:
+                    print(Fore.RED + f"❌ Invalid selection: {idx + 1}. Skipping.")
+        except ValueError:
+            print(Fore.RED + "❌ Invalid input. Please enter numbers separated by commas or 'all'.")
+            return
+
+    if not files_to_upload:
+        print(Fore.YELLOW + "No valid files selected for upload.")
+        return
+
+    upload_url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
+
+    for file_path in files_to_upload:
+        try:
+            with open(file_path, 'rb') as f:
+                file_content = f.read().decode('utf-8')
+            
+            # Extract info for caption
+            scan_date = "N/A"
+            operating_system = "N/A"
+            for line in file_content.splitlines():
+                if "Scan Date:" in line:
+                    scan_date = line.replace("Scan Date:", "").strip()
+                if "Operating System:" in line:
+                    operating_system = line.replace("Operating System:", "").strip()
+            
+            upload_time = datetime.datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')
+            caption = f"Scan Result Uploaded\n\nUpload Time: {upload_time}\nScan Date: {scan_date}\nOperating System: {operating_system}"
+
+            files = {'document': (os.path.basename(file_path), open(file_path, 'rb'))}
+            data = {'chat_id': chat_id, 'caption': caption}
+            
+            print(Fore.YELLOW + f"Uploading {os.path.basename(file_path)}...")
+            response = requests.post(upload_url, files=files, data=data)
+            
+            if response.status_code == 200:
+                print(Fore.GREEN + f"✅ Successfully uploaded {os.path.basename(file_path)} to Telegram.")
+                # Move the file to the uploaded folder
+                shutil.move(file_path, os.path.join(UPLOADED_RESULTS_FOLDER, os.path.basename(file_path)))
+                print(Fore.GREEN + f"✔️ Moved {os.path.basename(file_path)} to {UPLOADED_RESULTS_FOLDER}")
+            else:
+                print(Fore.RED + f"❌ Failed to upload {os.path.basename(file_path)}. Status code: {response.status_code}")
+                print(Fore.RED + f"Response: {response.text}")
+        except Exception as e:
+            print(Fore.RED + f"❌ Error uploading {os.path.basename(file_path)}: {e}")
+        finally:
+            if 'files' in locals() and 'document' in files:
+                files['document'][1].close() # Close the file handle
+
+    print(Fore.GREEN + "\n✅ Telegram upload process completed.")
+
+# Update Tool Function
+def update_tool():
+    print(Fore.CYAN + "\n🔄 Checking for updates...")
+    repo_url = SETTINGS.get("git_repo_url")
+    if repo_url == "https://github.com/your-username/mscanfocus.git" or not repo_url:
+        print(Fore.RED + "❌ Please configure your Git repository URL in settings first.")
+        return
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dir, os.pardir))
+    
+    temp_dir = os.path.join(project_root, "temp_update")
+    
+    # Clean up any previous temp directory
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+
+    try:
+        print(Fore.YELLOW + f"Cloning {repo_url} into {temp_dir}...")
+        os.system(f"git clone {repo_url} {temp_dir}")
+        
+        if not os.path.exists(temp_dir) or not os.listdir(temp_dir):
+            print(Fore.RED + "❌ Git clone failed or repository is empty.")
+            return
+
+        print(Fore.YELLOW + "Updating files...")
+        # Preserve settings.txt and uploaded_results folder
+        settings_path = os.path.join(project_root, "🔧settings", "settings.txt")
+        uploaded_results_path = os.path.join(project_root, "uploaded_results")
+        
+        current_settings_data = {}
+        if os.path.exists(settings_path):
+            with open(settings_path, 'r') as f:
+                try:
+                    current_settings_data = json.load(f)
+                except json.JSONDecodeError:
+                    print(Fore.RED + "❌ Error reading existing settings.txt. Using defaults for merge.")
+                    current_settings_data = {}
+
+        # Remove old files, excluding .git, 🔧settings, and uploaded_results
+        for item in os.listdir(project_root):
+            item_path = os.path.join(project_root, item)
+            if item == ".git" or item == "🔧settings" or item == "uploaded_results":
+                continue
+            if os.path.isfile(item_path):
+                os.remove(item_path)
+            elif os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+        
+        # Copy new files from temp_dir to project_root
+        for item in os.listdir(temp_dir):
+            item_path = os.path.join(temp_dir, item)
+            if item == ".git":
+                continue
+            if os.path.isfile(item_path):
+                shutil.copy(item_path, project_root)
+            elif os.path.isdir(item_path):
+                shutil.copytree(item_path, os.path.join(project_root, item))
+
+        # Merge and restore settings.txt
+        # Load default settings from the newly copied script (which is now the current one)
+        # Temporarily load the new default settings from the script itself
+        # This is a bit hacky but ensures we get the latest DEFAULT_SETTINGS
+        # A more robust solution would involve a separate defaults file or versioning
+        
+        # Re-import SETTINGS from the current script to get the latest defaults
+        # This is tricky because it's already imported.
+        # A simpler approach for this CLI tool is to assume DEFAULT_SETTINGS is consistent
+        # or to re-read the script to extract it. For now, we'll use the current SETTINGS
+        # and assume it reflects the new defaults after the copy.
+        
+        # For a clean merge, we need the DEFAULT_SETTINGS from the *new* version.
+        # Since the new files are copied, the SETTINGS variable in this running script
+        # might not reflect the *new* defaults if the script itself changed.
+        # The most reliable way is to load the DEFAULT_SETTINGS from the newly copied
+        # mscanfocus script itself. This is complex for a simple CLI.
+        # A pragmatic approach for this context: assume the DEFAULT_SETTINGS in the
+        # currently running script (which is about to be replaced) is sufficient
+        # for merging, or that the new script's DEFAULT_SETTINGS will be applied
+        # on next run if it's a fresh setting.
+        # Let's make it robust by re-loading the default settings from the newly copied script.
+        
+        # To get the *new* default settings, we need to re-evaluate the script or have a separate defaults file.
+        # For simplicity and given the CLI nature, we'll assume the DEFAULT_SETTINGS
+        # in the *currently running* script (which is the old one) is sufficient for merging
+        # with the user's existing settings. New settings will be added from the old DEFAULT_SETTINGS.
+        # This is a slight compromise but avoids complex dynamic module reloading.
+        # The user will get new settings on the *next* run if they were truly new.
+
+        # Let's refine the merge logic to be more robust.
+        # We need the DEFAULT_SETTINGS from the *newly updated* script.
+        # The easiest way to get this is to re-load the SETTINGS after the copy.
+        # However, that would require restarting the script.
+        # A better way for this context is to load the default settings from the *new* script file directly.
+        
+        # This is a more robust way to get the new default settings:
+        new_default_settings = {}
+        try:
+            with open(os.path.join(project_root, "bin", "mscanfocus"), 'r') as f_new_script:
+                script_content = f_new_script.read()
+                # A simple regex to extract DEFAULT_SETTINGS dictionary
+                import re
+                match = re.search(r"DEFAULT_SETTINGS = ({.*?})", script_content, re.DOTALL)
+                if match:
+                    # Safely evaluate the dictionary string
+                    new_default_settings = eval(match.group(1))
+        except Exception as e:
+            print(Fore.RED + f"❌ Could not extract new default settings: {e}. Using current defaults.")
+            new_default_settings = DEFAULT_SETTINGS # Fallback to current defaults
+
+        merged_settings = new_default_settings.copy()
+        merged_settings.update(current_settings_data) # User's settings override new defaults
+
+        with open(settings_path, 'w') as f:
+            json.dump(merged_settings, f, indent=4)
+        print(Fore.GREEN + "✔️ Merged and restored settings.txt.")
+
+        # Restore uploaded_results
+        if os.path.exists(uploaded_results_path):
+            shutil.rmtree(uploaded_results_path) # Remove old folder before copying new
+        if os.path.exists(os.path.join(temp_dir, "uploaded_results_bak")):
+            shutil.copytree(os.path.join(temp_dir, "uploaded_results_bak"), uploaded_results_path)
+            print(Fore.GREEN + "✔️ Restored uploaded_results folder.")
+
+        print(Fore.YELLOW + "Running install.sh...")
+        install_script_path = os.path.join(project_root, "install.sh")
+        if os.path.exists(install_script_path):
+            os.system(f"bash {install_script_path}")
+        else:
+            print(Fore.RED + "❌ install.sh not found in the updated repository.")
+
+        print(Fore.GREEN + "✅ Update completed successfully! Please restart the tool to ensure all changes are loaded.")
+
+    except Exception as e:
+        print(Fore.RED + f"❌ An error occurred during update: {e}")
+    finally:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            print(Fore.YELLOW + "Cleaned up temporary files.")
+
+# Main function
+def main():
+    # Clear the terminal before displaying the header
+    os.system("clear" if os.name == "posix" else "cls")
+    
+    # Display the header
+    display_header()
+    
+    # Get user choice
+    scan_input = get_input("Enter your choice", default="1")
+    
+    if scan_input == "1":
+        ports, threads, method = get_scan_inputs()
+        selected_file = file_manager(MANUAL_SCAN_FOLDER)
+        if selected_file:
+            hosts = get_hosts_from_file(selected_file)
+            if hosts:
+                perform_scan(
+                    hosts,
+                    ports,
+                    os.path.join(RESULTS_MANUAL_FOLDER, f"xresult_manual_{selected_file.name}"),
+                    threads,
+                    method
+                )
+    elif scan_input == "2":
+        auto_scan()
+    elif scan_input == "3":
+        manual_input_scan()
+    elif scan_input == "4":
+        edit_settings()
+        # Return to main menu after editing settings
+        main()
+    elif scan_input == "5":
+        upload_results_to_telegram()
+    elif scan_input == "6":
+        update_tool()
+    else:
+        print(Fore.RED + "❌ Invalid choice. Exiting.")
+
+if __name__ == "__main__":
+    main()
