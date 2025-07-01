@@ -536,10 +536,10 @@ def update_tool():
                     print(Fore.RED + "❌ Error reading existing settings.txt. Using defaults for merge.")
                     current_settings_data = {}
 
-        # Remove old files, excluding .git, 🔧settings, and uploaded_results
+        # Remove old files, excluding .git, 🔧settings, uploaded_results, and temp_update
         for item in os.listdir(project_root):
             item_path = os.path.join(project_root, item)
-            if item == ".git" or item == "🔧settings" or item == "uploaded_results":
+            if item == ".git" or item == "🔧settings" or item == "uploaded_results" or item == "temp_update":
                 continue
             if os.path.isfile(item_path):
                 os.remove(item_path)
