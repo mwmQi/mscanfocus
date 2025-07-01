@@ -1,5 +1,7 @@
 #!/bin/bash
 
+pkg install python -y
+
 PREFIX="/data/data/com.termux/files/usr"
 
 mkdir -p $PREFIX/bin
