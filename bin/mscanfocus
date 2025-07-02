@@ -505,8 +505,7 @@ def update_tool():
         print(Fore.RED + "❌ Please configure your Git repository URL in settings first.")
         return
 
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(current_dir, os.pardir))
+    project_root = "/storage/emulated/0/mscanfocus"
     
     temp_dir = os.path.join(project_root, "temp_update")
     
@@ -524,7 +523,7 @@ def update_tool():
 
         print(Fore.YELLOW + "Updating files...")
         # Preserve settings.txt and uploaded_results folder
-        settings_path = os.path.join(project_root, "🔧settings", "settings.txt")
+        settings_path = SETTINGS_FILE
         uploaded_results_path = os.path.join(project_root, "uploaded_results")
         
         current_settings_data = {}
